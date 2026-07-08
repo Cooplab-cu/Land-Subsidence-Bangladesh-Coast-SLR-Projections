@@ -1,0 +1,12 @@
+$model_uncertainty_cm_2075
+[1] 2.658915
+
+$scenario_spread_cm_2075
+[1] 33
+
+$subsidence_range_mm_yr
+[1]  5.4 18.5
+
+$best_model_test_RMSE_cm
+[1] 0.196
+

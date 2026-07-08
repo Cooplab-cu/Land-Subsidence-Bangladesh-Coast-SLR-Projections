@@ -1,0 +1,37 @@
+"weighting","rank","district","index"
+"default",1,"Satkhira",0.901358187092539
+"default",2,"Patuakhali",0.843926742983054
+"default",3,"Bagerhat",0.774576951002777
+"default",4,"Bhola",0.770668129046569
+"default",5,"Barguna",0.768238654909809
+"default",6,"Khulna",0.75391981333922
+"default",7,"Pirojpur",0.72082537659113
+"default",8,"Lakshmipur",0.714166934053821
+"default",9,"Noakhali",0.657347845283454
+"default",10,"Chittagong",0.641165049728024
+"default",11,"Feni",0.628967145737036
+"default",12,"Cox's Bazar",0.602987538472846
+"slr_dominant",1,"Satkhira",0.934253505789434
+"slr_dominant",2,"Patuakhali",0.821317115461054
+"slr_dominant",3,"Bagerhat",0.804432156530056
+"slr_dominant",4,"Khulna",0.795534876024778
+"slr_dominant",5,"Barguna",0.779394669157798
+"slr_dominant",6,"Bhola",0.76509848128221
+"slr_dominant",7,"Pirojpur",0.753892939853282
+"slr_dominant",8,"Lakshmipur",0.70787984880692
+"slr_dominant",9,"Noakhali",0.661440482748375
+"slr_dominant",10,"Feni",0.625383935751768
+"slr_dominant",11,"Chittagong",0.617590455880978
+"slr_dominant",12,"Cox's Bazar",0.574969561083504
+"equal_weight",1,"Satkhira",0.876697733865673
+"equal_weight",2,"Patuakhali",0.860892276012224
+"equal_weight",3,"Bhola",0.774825616521134
+"equal_weight",4,"Barguna",0.759857790002899
+"equal_weight",5,"Bagerhat",0.752178604318816
+"equal_weight",6,"Khulna",0.722686110286359
+"equal_weight",7,"Lakshmipur",0.71888341059224
+"equal_weight",8,"Pirojpur",0.696002352163288
+"equal_weight",9,"Chittagong",0.65883516678558
+"equal_weight",10,"Noakhali",0.654283925547049
+"equal_weight",11,"Feni",0.631656802949562
+"equal_weight",12,"Cox's Bazar",0.623962029552144

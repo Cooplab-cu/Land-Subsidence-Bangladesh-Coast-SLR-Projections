@@ -1,0 +1,13 @@
+"","Satkhira","Khulna","Bagerhat","Pirojpur","Barguna","Patuakhali","Bhola","Lakshmipur","Noakhali","Feni","Chittagong","Cox's Bazar"
+"Satkhira",0,0,0,0,0,0,0,0,0,0,1e-04,0.0015
+"Khulna",0,0,0,0,0,0,0,0,0,0,0,0
+"Bagerhat",0,0,0,0,0,0,0,0,0,0,1e-04,3e-04
+"Pirojpur",0,0,0,0,0,0,0,0,0,0,0,0
+"Barguna",0,0,0,0,0,0,0,0,0,0,1e-04,1e-04
+"Patuakhali",0,0,0,0,0,0,0,0,0,0,2e-04,0.0016
+"Bhola",0,0,0,0,0,0,0,0,0,0,0,0
+"Lakshmipur",0,0,0,0,0,0,0,0,0,0,0,4e-04
+"Noakhali",0,0,0,0,0,0,0,0,0,0,0,7e-04
+"Feni",0,0,0,0,0,0,0,0,0,0,0,5e-04
+"Chittagong",1e-04,0,1e-04,0,1e-04,2e-04,0,0,0,0,0,2e-04
+"Cox's Bazar",0.0015,0,3e-04,0,1e-04,0.0016,0,4e-04,7e-04,5e-04,2e-04,0

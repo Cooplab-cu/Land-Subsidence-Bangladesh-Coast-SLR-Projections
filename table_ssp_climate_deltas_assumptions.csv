@@ -1,0 +1,4 @@
+"scenario","sst_delta_c","rainfall_pct_change","discharge_pct_change"
+"SSP1-2.6",0.3,0.02,0.05
+"SSP2-4.5",0.8,0.06,0.12
+"SSP5-8.5",1.8,0.14,0.25

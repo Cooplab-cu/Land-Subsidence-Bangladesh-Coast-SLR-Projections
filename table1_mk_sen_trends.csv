@@ -1,0 +1,4 @@
+"station","period","n_years","sen_slope_mm_yr","ci_lower_mm","ci_upper_mm","mk_tau","p_value","significance"
+"Charchanga","1969-2024",56,6.76,-2.42,14.99,0.931,0,"***"
+"Cox's Bazar","1969-2024",56,2.72,-13.69,20.23,0.687,7.99e-14,"***"
+"Hiron Point","1969-2024",56,-6.49,-25.46,12.83,-0.84,0,"***"

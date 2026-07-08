@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software or its outputs, please cite both the manuscript and this repository."
+title: "Land Subsidence as the Dominant Driver of Relative Sea Level Rise Along the Bangladesh Coast: Tide-Gauge Trends and IPCC AR6 Projections to 2075 — Analysis Code"
+type: software
+authors:
+  - family-names: "Hossain"
+    given-names: "Roman"
+    # TODO: add ORCID iD if available, e.g. orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/REPLACE-WITH-YOUR-USERNAME/SLR-Bangladesh-Coastal-Risk"
+license: MIT
+keywords:
+  - sea level rise
+  - Bangladesh coast
+  - land subsidence
+  - Mann-Kendall trend test
+  - PSMSL
+  - IPCC AR6
+  - Bay of Bengal
+  - compound flood risk
+  - Sundarbans
+  - storm surge
+  - total water level
+  - Hazard-Exposure-Vulnerability framework
+# TODO once a Zenodo release is minted, add:
+# doi: 10.5281/zenodo.REPLACE-WITH-DOI
+# date-released: "YYYY-MM-DD"
+# version: "1.0.0"

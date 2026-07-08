@@ -1,0 +1,843 @@
+## =============================================================================
+## SCRIPT 11 of 11: Full IPCC-style Hazard x Exposure x Vulnerability risk
+## assessment for 2075
+##   -> Extension #20: implements the three-pillar IPCC AR5/AR6 risk framework
+##      (Risk = f(Hazard, Exposure, Vulnerability)) properly, instead of the
+##      SLR-only or SLR x population-density shortcuts used earlier in the
+##      pipeline (scripts 06, 09, 10).
+##        HAZARD       : extreme water level (EWL), meteorological forcing,
+##                        topography-based potential inundation depth
+##        EXPOSURE     : future land-use/cover, demographic projection,
+##                        critical infrastructure inventory
+##        VULNERABILITY: depth-damage curve, coastal defence standards,
+##                        socio-economic vulnerability index
+## Run scripts 01-06 first (needs `district_cov`, `district_forecast`,
+## `approx_centroids`, `out_dir`, `fig_dir`).
+## =============================================================================
+
+## ---- 0a. DEFENSIVE OUTPUT-DIR SETUP -------------------------------------------
+## See script 07's note -- recreates out_dir/fig_dir/data_dir if this script
+## is sourced standalone or the working directory changed since script 01.
+if (!exists("data_dir")) data_dir <- "data"
+if (!exists("out_dir"))  out_dir  <- "outputs"
+if (!exists("fig_dir"))  fig_dir  <- file.path(out_dir, "figures")
+dir.create(data_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fig_dir,  showWarnings = FALSE, recursive = TRUE)
+
+## ---- 0. DATA FILE PATHS -------------------------------------------------------
+## Each loader below checks for a real file first and falls back to a clearly
+## labeled illustrative value if it's missing -- exactly like every other
+## loader in this pipeline. See README.md for the full list of files/columns
+## expected here. All are cross-sectional (one row per district) except the
+## depth-damage curve, which is a universal depth -> damage-fraction function.
+
+ewl_file            <- file.path(data_dir, "extreme_water_level.csv")
+met_forcing_file    <- file.path(data_dir, "meteorological_forcing_2075.csv")
+lulc_file           <- file.path(data_dir, "future_lulc_2075.csv")
+demo_proj_file      <- file.path(data_dir, "demographic_projection_2075.csv")
+infra_file          <- file.path(data_dir, "critical_infrastructure.csv")
+depth_damage_file   <- file.path(data_dir, "depth_damage_curves.csv")
+defence_file        <- file.path(data_dir, "coastal_defence_standards.csv")
+svi_file            <- file.path(data_dir, "socioeconomic_vulnerability.csv")
+
+districts12 <- district_cov$district
+
+## =============================================================================
+## PILLAR 1: HAZARD
+## =============================================================================
+
+## ---- 1a. Extreme Water Level (EWL) --------------------------------------------
+## Real workflow: a joint-probability (copula / JPM-OS) study combining tide +
+## storm surge + wave setup, giving a design water level per district for a
+## chosen return period (100-yr used here to match typical FLOPROS/BWDB
+## design practice). Fallback is scaled off each district's existing cyclone
+## frequency (district_cov$cyclone_freq_per_decade) so districts already
+## flagged as more cyclone-exposed also get a higher illustrative EWL.
+load_ewl <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "ewl_100yr_m") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] extreme_water_level.csv not found -- deriving an illustrative ",
+          "100-yr EWL from each district's cyclone frequency (district_cov$cyclone_freq_per_decade).")
+  data.frame(district = district_cov$district,
+             ewl_100yr_m = round(2.5 + district_cov$cyclone_freq_per_decade * 0.4, 2))
+}
+ewl_data <- load_ewl(ewl_file)
+
+## ---- 1b. Meteorological forcing -----------------------------------------------
+## Real workflow: projected design wind speed / pressure field / storm-track
+## density for 2075 from a regional tide-surge-wave model driver set.
+## Fallback again scales off cyclone_freq_per_decade for internal consistency.
+load_met_forcing <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "design_wind_speed_ms") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] meteorological_forcing_2075.csv not found -- deriving an ",
+          "illustrative 2075 design wind speed from cyclone frequency.")
+  data.frame(district = district_cov$district,
+             design_wind_speed_ms = round(45 + district_cov$cyclone_freq_per_decade * 5, 1))
+}
+met_data <- load_met_forcing(met_forcing_file)
+
+## ---- 1c. Topography-based potential inundation depth --------------------------
+## Note: real high-resolution coastal topography/bathymetry (LiDAR DEM +
+## nearshore bathymetry) is a raster workflow (per-pixel intersection of the
+## RSLR+EWL water level with elevation), not a CSV, and is beyond what a
+## single script can auto-detect. This approximates "potential inundation
+## depth" at the district-mean level using elevation_m already in
+## district_cov, combined with this district's own 2075/SSP5-8.5 relative
+## SLR (from district_forecast, script 06) and its EWL design water level.
+inundation_input <- district_forecast %>%
+  filter(year == 2075, scenario == "SSP5-8.5") %>%
+  select(district, district_relative_slr_cm) %>%
+  left_join(district_cov %>% select(district, elevation_m), by = "district") %>%
+  left_join(ewl_data, by = "district") %>%
+  mutate(
+    potential_inundation_depth_m = pmax(0, district_relative_slr_cm / 100 + ewl_100yr_m - elevation_m)
+  )
+
+## ---- 1d. Combine into HAZARD index --------------------------------------------
+## Rescales to [0.05, 1] rather than the usual [0, 1]. This matters here
+## specifically because H, E, and V are combined MULTIPLICATIVELY below
+## (Risk = H x E x V, the standard IPCC form) -- with a plain 0-1 min-max,
+## whichever single district happens to score lowest on ANY one pillar is
+## forced to exactly 0 on that pillar, which zeroes its combined risk even if
+## its other two pillars are severe (an artifact of the normalization, not a
+## real finding). A small floor keeps every district's relative ranking
+## within each pillar while avoiding that all-or-nothing failure mode.
+minmax11 <- function(x, floor = 0.05) floor + (1 - floor) * (x - min(x, na.rm = TRUE)) / diff(range(x, na.rm = TRUE))
+
+hazard_data <- inundation_input %>%
+  left_join(met_data, by = "district") %>%
+  mutate(
+    inundation_norm = minmax11(potential_inundation_depth_m),
+    wind_norm        = minmax11(design_wind_speed_ms),
+    hazard_index     = 0.6 * inundation_norm + 0.4 * wind_norm
+  ) %>%
+  select(district, ewl_100yr_m, design_wind_speed_ms, elevation_m,
+         district_relative_slr_cm, potential_inundation_depth_m, hazard_index)
+
+write.csv(hazard_data, file.path(out_dir, "table_hazard_data_2075.csv"), row.names = FALSE)
+
+## =============================================================================
+## PILLAR 2: EXPOSURE
+## =============================================================================
+
+## ---- 2a. Future land-use/land-cover (2075) ------------------------------------
+## Real workflow: an urban-growth / LULC projection model (e.g. CA-Markov,
+## SLEUTH) run out to 2075. Fallback ties urban growth to today's population
+## density and gives natural-buffer coverage (mangrove/marsh) the inverse
+## relationship, so already-dense districts are projected to urbanize
+## further and lose more of their natural buffer.
+load_lulc <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "urban_pct_2075", "agri_pct_2075", "natural_buffer_pct_2075") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] future_lulc_2075.csv not found -- projecting urban/natural-buffer ",
+          "share from current population density (district_cov$pop_density_km2).")
+  urban <- pmin(70, 15 + district_cov$pop_density_km2 / 30)
+  buffer <- pmax(5, 40 - district_cov$pop_density_km2 / 60)
+  data.frame(district = district_cov$district,
+             urban_pct_2075 = round(urban, 1),
+             natural_buffer_pct_2075 = round(buffer, 1),
+             agri_pct_2075 = round(100 - urban - buffer, 1))
+}
+lulc_data <- load_lulc(lulc_file)
+
+## ---- 2b. Demographic projection (2075) ----------------------------------------
+## Real workflow: WorldPop/SEDAC gridded population projections consistent
+## with the same SSP used for the SLR scenario (SSP5-8.5 here). Fallback
+## applies a uniform 55% growth factor over the 2025-2075 horizon to today's
+## density -- a simplification; replace with an SSP-consistent projection.
+load_demo_proj <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "pop_density_projected_km2") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] demographic_projection_2075.csv not found -- applying a uniform ",
+          "+55% growth factor to current pop_density_km2 (illustrative; not SSP-consistent).")
+  data.frame(district = district_cov$district,
+             pop_density_projected_km2 = round(district_cov$pop_density_km2 * 1.55))
+}
+demo_data <- load_demo_proj(demo_proj_file)
+
+## ---- 2c. Critical infrastructure inventory ------------------------------------
+## Real workflow: geolocated counts of power plants, water treatment plants,
+## and transport nodes (roads/rail/ports) per district, from a national
+## infrastructure GIS layer (e.g. BBS, LGED, or OpenStreetMap extraction).
+## Fallback gives illustrative counts loosely tracking urbanization, with a
+## deliberate bump for Chittagong (major port/industrial hub) and Cox's
+## Bazar (tourism + refugee-camp service infrastructure).
+load_infra <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "power_plants_n", "water_treatment_n", "transport_nodes_n") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] critical_infrastructure.csv not found -- using illustrative facility ",
+          "counts loosely scaled to district urbanization.")
+  data.frame(
+    district           = c("Satkhira","Khulna","Bagerhat","Pirojpur","Barguna","Patuakhali",
+                            "Bhola","Lakshmipur","Noakhali","Feni","Chittagong","Cox's Bazar"),
+    power_plants_n     = c(1,2,1,1,0,1,1,2,2,1,5,2),
+    water_treatment_n  = c(2,4,2,1,1,2,2,3,3,2,8,4),
+    transport_nodes_n  = c(4,7,4,3,2,4,4,6,6,4,15,8)
+  )
+}
+infra_data <- load_infra(infra_file)
+
+## ---- 2d. Combine into EXPOSURE index ------------------------------------------
+exposure_data <- lulc_data %>%
+  left_join(demo_data, by = "district") %>%
+  left_join(infra_data, by = "district") %>%
+  mutate(
+    land_exposure_score = urban_pct_2075 - 0.3 * natural_buffer_pct_2075,
+    infra_score          = power_plants_n * 3 + water_treatment_n * 2 + transport_nodes_n,
+    pop_norm             = minmax11(pop_density_projected_km2),
+    land_norm            = minmax11(land_exposure_score),
+    infra_norm           = minmax11(infra_score),
+    exposure_index        = 0.40 * pop_norm + 0.35 * land_norm + 0.25 * infra_norm
+  ) %>%
+  select(district, urban_pct_2075, agri_pct_2075, natural_buffer_pct_2075,
+         pop_density_projected_km2, power_plants_n, water_treatment_n, transport_nodes_n,
+         exposure_index)
+
+write.csv(exposure_data, file.path(out_dir, "table_exposure_data_2075.csv"), row.names = FALSE)
+
+## =============================================================================
+## PILLAR 3: VULNERABILITY
+## =============================================================================
+
+## ---- 3a. Depth-damage curve ----------------------------------------------------
+## Real workflow: a sector-specific, ideally locally-calibrated depth-damage
+## function (e.g. from a JRC/World Bank/BWDB post-flood damage survey).
+## Fallback is a generic composite residential/commercial curve (damage
+## fraction rising steeply from 0-2m then flattening as structures reach
+## near-total-loss), applied to each district's own potential inundation
+## depth from the Hazard pillar via linear interpolation.
+load_depth_damage <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("depth_m", "damage_fraction") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] depth_damage_curves.csv not found -- using a generic composite ",
+          "residential/commercial depth-damage curve (not locally calibrated).")
+  data.frame(depth_m = seq(0, 5, by = 0.5),
+             damage_fraction = c(0.00, 0.20, 0.35, 0.48, 0.58, 0.66, 0.73, 0.79, 0.84, 0.88, 0.92))
+}
+depth_damage_curve <- load_depth_damage(depth_damage_file)
+
+## ---- 3b. Coastal defence standards --------------------------------------------
+## Real workflow: FLOPROS or a BWDB polder/embankment inventory giving each
+## district's actual protection standard (design return period). Fallback
+## gives higher protection to the two urban/port districts (Khulna,
+## Chittagong) and lower protection to more rural, exposed districts.
+load_defence <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "defence_design_return_period_yrs") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] coastal_defence_standards.csv not found -- using illustrative ",
+          "FLOPROS-style design return periods (urban/port districts assumed better protected).")
+  data.frame(
+    district = c("Satkhira","Khulna","Bagerhat","Pirojpur","Barguna","Patuakhali",
+                 "Bhola","Lakshmipur","Noakhali","Feni","Chittagong","Cox's Bazar"),
+    defence_design_return_period_yrs = c(25, 50, 25, 20, 20, 25, 25, 30, 30, 25, 75, 40)
+  )
+}
+defence_data <- load_defence(defence_file)
+
+## ---- 3c. Socio-economic vulnerability index (SVI) ------------------------------
+## Real workflow: a composite SVI built from BBS census / HIES indicators
+## (poverty rate, literacy, housing quality, access to services, dependency
+## ratio, etc.), typically 0 (least vulnerable) to 1 (most vulnerable).
+## Fallback gives illustrative values, with more rural/exposed districts
+## scored higher and Cox's Bazar bumped up to reflect documented added
+## strain from hosting a large displaced-persons population alongside the
+## host community.
+load_svi <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "svi_score") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] socioeconomic_vulnerability.csv not found -- using an illustrative ",
+          "composite SVI (not derived from BBS/HIES microdata).")
+  data.frame(
+    district  = c("Satkhira","Khulna","Bagerhat","Pirojpur","Barguna","Patuakhali",
+                  "Bhola","Lakshmipur","Noakhali","Feni","Chittagong","Cox's Bazar"),
+    svi_score = c(0.72, 0.55, 0.68, 0.66, 0.78, 0.75, 0.74, 0.60, 0.58, 0.52, 0.40, 0.70)
+  )
+}
+svi_data <- load_svi(svi_file)
+
+## ---- 3d. Combine into VULNERABILITY index --------------------------------------
+vulnerability_data <- hazard_data %>%
+  select(district, potential_inundation_depth_m) %>%
+  mutate(damage_fraction = approx(depth_damage_curve$depth_m, depth_damage_curve$damage_fraction,
+                                   xout = potential_inundation_depth_m, rule = 2)$y) %>%
+  left_join(defence_data, by = "district") %>%
+  left_join(svi_data, by = "district") %>%
+  mutate(
+    ## protection gap relative to the 100-yr EWL design standard used in the Hazard
+    ## pillar -- a district whose embankments are only rated for a 20-yr event has
+    ## a much larger gap than one rated for 75-100 yr.
+    defence_gap_norm  = minmax11(1 / defence_design_return_period_yrs),
+    damage_norm       = minmax11(damage_fraction),
+    svi_norm          = minmax11(svi_score),
+    vulnerability_index = 0.40 * damage_norm + 0.30 * defence_gap_norm + 0.30 * svi_norm
+  ) %>%
+  select(district, damage_fraction, defence_design_return_period_yrs, svi_score, vulnerability_index)
+
+write.csv(vulnerability_data, file.path(out_dir, "table_vulnerability_data_2075.csv"), row.names = FALSE)
+
+## =============================================================================
+## COMBINE: FULL RISK = HAZARD x EXPOSURE x VULNERABILITY (IPCC AR5/AR6 form)
+## =============================================================================
+
+full_risk_2075 <- hazard_data %>%
+  select(district, hazard_index) %>%
+  left_join(exposure_data %>% select(district, exposure_index), by = "district") %>%
+  left_join(vulnerability_data %>% select(district, vulnerability_index), by = "district") %>%
+  left_join(approx_centroids, by = "district") %>%
+  mutate(
+    risk_score = hazard_index * exposure_index * vulnerability_index,
+    risk_class = cut(risk_score,
+                      breaks = quantile(risk_score, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE),
+                      labels = c("LOW", "MODERATE", "HIGH", "SEVERE"),
+                      include.lowest = TRUE)
+  ) %>%
+  select(district, lon, lat, hazard_index, exposure_index, vulnerability_index, risk_score, risk_class) %>%
+  arrange(desc(risk_score))
+
+write.csv(full_risk_2075, file.path(out_dir, "table_full_risk_assessment_2075.csv"), row.names = FALSE)
+
+cat("\n=== FULL HAZARD x EXPOSURE x VULNERABILITY RISK ASSESSMENT, 2075 (SSP5-8.5) ===\n")
+print(full_risk_2075)
+
+## ---- FIGURE: FOUR-PANEL H / E / V / RISK COMPARISON ----------------------------
+mk_panel <- function(df, fill_var, title, palette) {
+  ggplot2::ggplot(df, ggplot2::aes(lon, lat, color = .data[[fill_var]], size = .data[[fill_var]])) +
+    ggplot2::geom_point() +
+    ggplot2::scale_color_distiller(palette = palette, direction = 1) +
+    ggplot2::labs(title = title, x = NULL, y = NULL, color = NULL, size = NULL) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "bottom", axis.text = ggplot2::element_blank())
+}
+
+p_hazard <- mk_panel(full_risk_2075, "hazard_index", "Hazard", "Oranges")
+p_exposure <- mk_panel(full_risk_2075, "exposure_index", "Exposure", "Blues")
+p_vulnerability <- mk_panel(full_risk_2075, "vulnerability_index", "Vulnerability", "Purples")
+p_risk <- mk_panel(full_risk_2075, "risk_score", "Combined Risk (H x E x V)", "RdPu")
+
+if (requireNamespace("cowplot", quietly = TRUE)) {
+  p_full_framework <- cowplot::plot_grid(p_hazard, p_exposure, p_vulnerability, p_risk, ncol = 2,
+                                          labels = "AUTO")
+  p_full_framework <- cowplot::ggdraw() +
+    cowplot::draw_label("IPCC-Style Hazard x Exposure x Vulnerability Risk Framework, 2075 (SSP5-8.5)",
+                         fontface = "bold", size = 13, y = 0.99) +
+    cowplot::draw_plot(p_full_framework, y = 0, height = 0.94)
+  ggplot2::ggsave(file.path(fig_dir, "fig_full_risk_framework_2075.png"), p_full_framework,
+                   width = 10, height = 9, dpi = 300)
+} else {
+  message("[fallback] `cowplot` unavailable -- saving the four H/E/V/Risk panels as separate figures.")
+  ggplot2::ggsave(file.path(fig_dir, "fig_hazard_2075.png"), p_hazard, width = 6, height = 5.5, dpi = 300)
+  ggplot2::ggsave(file.path(fig_dir, "fig_exposure_2075.png"), p_exposure, width = 6, height = 5.5, dpi = 300)
+  ggplot2::ggsave(file.path(fig_dir, "fig_vulnerability_2075.png"), p_vulnerability, width = 6, height = 5.5, dpi = 300)
+  ggplot2::ggsave(file.path(fig_dir, "fig_full_risk_framework_2075.png"), p_risk, width = 6, height = 5.5, dpi = 300)
+}
+
+save(hazard_data, exposure_data, vulnerability_data, full_risk_2075,
+     file = file.path(out_dir, "script11_workspace.RData"))
+
+cat("\nFull Hazard x Exposure x Vulnerability assessment complete. See:\n",
+    " - table_hazard_data_2075.csv, table_exposure_data_2075.csv, table_vulnerability_data_2075.csv\n",
+    " - table_full_risk_assessment_2075.csv (combined Risk = H x E x V, district ranking)\n",
+    " - fig_full_risk_framework_2075.png\n")
+
+## ---- FINAL SYNC (Git + 'pins') --------------------------------------------------
+## This is now the last script in the full 01-11 pipeline; re-push here so
+## scripts 10-11's outputs are captured too if run in one session.
+if (exists("sync_push")) {
+  sync_push(commit_message = paste0(
+    "Auto-sync: full pipeline run through 11_full_hazard_exposure_vulnerability_risk.R (",
+    format(Sys.time(), "%Y-%m-%d %H:%M"), ")"))
+}
+## =============================================================================
+## SCRIPT 11 of 11: Full IPCC-style Hazard x Exposure x Vulnerability risk
+## assessment for 2075
+##   -> Extension #20: implements the three-pillar IPCC AR5/AR6 risk framework
+##      (Risk = f(Hazard, Exposure, Vulnerability)) properly, instead of the
+##      SLR-only or SLR x population-density shortcuts used earlier in the
+##      pipeline (scripts 06, 09, 10).
+##        HAZARD       : extreme water level (EWL), meteorological forcing,
+##                        topography-based potential inundation depth
+##        EXPOSURE     : future land-use/cover, demographic projection,
+##                        critical infrastructure inventory
+##        VULNERABILITY: depth-damage curve, coastal defence standards,
+##                        socio-economic vulnerability index
+## Run scripts 01-06 first (needs `district_cov`, `district_forecast`,
+## `approx_centroids`, `out_dir`, `fig_dir`).
+## =============================================================================
+
+## ---- 0a. DEFENSIVE OUTPUT-DIR SETUP -------------------------------------------
+## See script 07's note -- recreates out_dir/fig_dir/data_dir if this script
+## is sourced standalone or the working directory changed since script 01.
+if (!exists("data_dir")) data_dir <- "data"
+if (!exists("out_dir"))  out_dir  <- "outputs"
+if (!exists("fig_dir"))  fig_dir  <- file.path(out_dir, "figures")
+dir.create(data_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(fig_dir,  showWarnings = FALSE, recursive = TRUE)
+
+## ---- 0. DATA FILE PATHS -------------------------------------------------------
+## Each loader below checks for a real file first and falls back to a clearly
+## labeled illustrative value if it's missing -- exactly like every other
+## loader in this pipeline. See README.md for the full list of files/columns
+## expected here. All are cross-sectional (one row per district) except the
+## depth-damage curve, which is a universal depth -> damage-fraction function.
+
+ewl_file            <- file.path(data_dir, "extreme_water_level.csv")
+met_forcing_file    <- file.path(data_dir, "meteorological_forcing_2075.csv")
+lulc_file           <- file.path(data_dir, "future_lulc_2075.csv")
+demo_proj_file      <- file.path(data_dir, "demographic_projection_2075.csv")
+infra_file          <- file.path(data_dir, "critical_infrastructure.csv")
+depth_damage_file   <- file.path(data_dir, "depth_damage_curves.csv")
+defence_file        <- file.path(data_dir, "coastal_defence_standards.csv")
+svi_file            <- file.path(data_dir, "socioeconomic_vulnerability.csv")
+
+districts12 <- district_cov$district
+
+## =============================================================================
+## PILLAR 1: HAZARD
+## =============================================================================
+
+## ---- 1a. Extreme Water Level (EWL) --------------------------------------------
+## Real workflow: a joint-probability (copula / JPM-OS) study combining tide +
+## storm surge + wave setup, giving a design water level per district for a
+## chosen return period (100-yr used here to match typical FLOPROS/BWDB
+## design practice). Fallback is scaled off each district's existing cyclone
+## frequency (district_cov$cyclone_freq_per_decade) so districts already
+## flagged as more cyclone-exposed also get a higher illustrative EWL.
+load_ewl <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "ewl_100yr_m") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] extreme_water_level.csv not found -- deriving an illustrative ",
+          "100-yr EWL from each district's cyclone frequency (district_cov$cyclone_freq_per_decade).")
+  data.frame(district = district_cov$district,
+             ewl_100yr_m = round(2.5 + district_cov$cyclone_freq_per_decade * 0.4, 2))
+}
+ewl_data <- load_ewl(ewl_file)
+
+## ---- 1b. Meteorological forcing -----------------------------------------------
+## Real workflow: projected design wind speed / pressure field / storm-track
+## density for 2075 from a regional tide-surge-wave model driver set.
+## Fallback again scales off cyclone_freq_per_decade for internal consistency.
+load_met_forcing <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "design_wind_speed_ms") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] meteorological_forcing_2075.csv not found -- deriving an ",
+          "illustrative 2075 design wind speed from cyclone frequency.")
+  data.frame(district = district_cov$district,
+             design_wind_speed_ms = round(45 + district_cov$cyclone_freq_per_decade * 5, 1))
+}
+met_data <- load_met_forcing(met_forcing_file)
+
+## ---- 1c. Topography-based potential inundation depth --------------------------
+## Note: real high-resolution coastal topography/bathymetry (LiDAR DEM +
+## nearshore bathymetry) is a raster workflow (per-pixel intersection of the
+## RSLR+EWL water level with elevation), not a CSV, and is beyond what a
+## single script can auto-detect. This approximates "potential inundation
+## depth" at the district-mean level using elevation_m already in
+## district_cov, combined with this district's own 2075/SSP5-8.5 relative
+## SLR (from district_forecast, script 06) and its EWL design water level.
+inundation_input <- district_forecast %>%
+  filter(year == 2075, scenario == "SSP5-8.5") %>%
+  select(district, district_relative_slr_cm) %>%
+  left_join(district_cov %>% select(district, elevation_m), by = "district") %>%
+  left_join(ewl_data, by = "district") %>%
+  mutate(
+    potential_inundation_depth_m = pmax(0, district_relative_slr_cm / 100 + ewl_100yr_m - elevation_m)
+  )
+
+## ---- 1d. Combine into HAZARD index --------------------------------------------
+## Rescales to [0.05, 1] rather than the usual [0, 1]. This matters here
+## specifically because H, E, and V are combined MULTIPLICATIVELY below
+## (Risk = H x E x V, the standard IPCC form) -- with a plain 0-1 min-max,
+## whichever single district happens to score lowest on ANY one pillar is
+## forced to exactly 0 on that pillar, which zeroes its combined risk even if
+## its other two pillars are severe (an artifact of the normalization, not a
+## real finding). A small floor keeps every district's relative ranking
+## within each pillar while avoiding that all-or-nothing failure mode.
+minmax11 <- function(x, floor = 0.05) floor + (1 - floor) * (x - min(x, na.rm = TRUE)) / diff(range(x, na.rm = TRUE))
+
+hazard_data <- inundation_input %>%
+  left_join(met_data, by = "district") %>%
+  mutate(
+    inundation_norm = minmax11(potential_inundation_depth_m),
+    wind_norm        = minmax11(design_wind_speed_ms),
+    hazard_index     = 0.6 * inundation_norm + 0.4 * wind_norm
+  ) %>%
+  select(district, ewl_100yr_m, design_wind_speed_ms, elevation_m,
+         district_relative_slr_cm, potential_inundation_depth_m, hazard_index)
+
+write.csv(hazard_data, file.path(out_dir, "table_hazard_data_2075.csv"), row.names = FALSE)
+
+## =============================================================================
+## PILLAR 2: EXPOSURE
+## =============================================================================
+
+## ---- 2a. Future land-use/land-cover (2075) ------------------------------------
+## Real workflow: an urban-growth / LULC projection model (e.g. CA-Markov,
+## SLEUTH) run out to 2075. Fallback ties urban growth to today's population
+## density and gives natural-buffer coverage (mangrove/marsh) the inverse
+## relationship, so already-dense districts are projected to urbanize
+## further and lose more of their natural buffer.
+load_lulc <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "urban_pct_2075", "agri_pct_2075", "natural_buffer_pct_2075") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] future_lulc_2075.csv not found -- projecting urban/natural-buffer ",
+          "share from current population density (district_cov$pop_density_km2).")
+  urban <- pmin(70, 15 + district_cov$pop_density_km2 / 30)
+  buffer <- pmax(5, 40 - district_cov$pop_density_km2 / 60)
+  data.frame(district = district_cov$district,
+             urban_pct_2075 = round(urban, 1),
+             natural_buffer_pct_2075 = round(buffer, 1),
+             agri_pct_2075 = round(100 - urban - buffer, 1))
+}
+lulc_data <- load_lulc(lulc_file)
+
+## ---- 2b. Demographic projection (2075) ----------------------------------------
+## Real workflow: WorldPop/SEDAC gridded population projections consistent
+## with the same SSP used for the SLR scenario (SSP5-8.5 here). Fallback
+## applies a uniform 55% growth factor over the 2025-2075 horizon to today's
+## density -- a simplification; replace with an SSP-consistent projection.
+load_demo_proj <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "pop_density_projected_km2") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] demographic_projection_2075.csv not found -- applying a uniform ",
+          "+55% growth factor to current pop_density_km2 (illustrative; not SSP-consistent).")
+  data.frame(district = district_cov$district,
+             pop_density_projected_km2 = round(district_cov$pop_density_km2 * 1.55))
+}
+demo_data <- load_demo_proj(demo_proj_file)
+
+## ---- 2c. Critical infrastructure inventory ------------------------------------
+## Real workflow: geolocated counts of power plants, water treatment plants,
+## and transport nodes (roads/rail/ports) per district, from a national
+## infrastructure GIS layer (e.g. BBS, LGED, or OpenStreetMap extraction).
+## Fallback gives illustrative counts loosely tracking urbanization, with a
+## deliberate bump for Chittagong (major port/industrial hub) and Cox's
+## Bazar (tourism + refugee-camp service infrastructure).
+load_infra <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "power_plants_n", "water_treatment_n", "transport_nodes_n") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] critical_infrastructure.csv not found -- using illustrative facility ",
+          "counts loosely scaled to district urbanization.")
+  data.frame(
+    district           = c("Satkhira","Khulna","Bagerhat","Pirojpur","Barguna","Patuakhali",
+                           "Bhola","Lakshmipur","Noakhali","Feni","Chittagong","Cox's Bazar"),
+    power_plants_n     = c(1,2,1,1,0,1,1,2,2,1,5,2),
+    water_treatment_n  = c(2,4,2,1,1,2,2,3,3,2,8,4),
+    transport_nodes_n  = c(4,7,4,3,2,4,4,6,6,4,15,8)
+  )
+}
+infra_data <- load_infra(infra_file)
+
+## ---- 2d. Combine into EXPOSURE index ------------------------------------------
+exposure_data <- lulc_data %>%
+  left_join(demo_data, by = "district") %>%
+  left_join(infra_data, by = "district") %>%
+  mutate(
+    land_exposure_score = urban_pct_2075 - 0.3 * natural_buffer_pct_2075,
+    infra_score          = power_plants_n * 3 + water_treatment_n * 2 + transport_nodes_n,
+    pop_norm             = minmax11(pop_density_projected_km2),
+    land_norm            = minmax11(land_exposure_score),
+    infra_norm           = minmax11(infra_score),
+    exposure_index        = 0.40 * pop_norm + 0.35 * land_norm + 0.25 * infra_norm
+  ) %>%
+  select(district, urban_pct_2075, agri_pct_2075, natural_buffer_pct_2075,
+         pop_density_projected_km2, power_plants_n, water_treatment_n, transport_nodes_n,
+         exposure_index)
+
+write.csv(exposure_data, file.path(out_dir, "table_exposure_data_2075.csv"), row.names = FALSE)
+
+## =============================================================================
+## PILLAR 3: VULNERABILITY
+## =============================================================================
+
+## ---- 3a. Depth-damage curve ----------------------------------------------------
+## Real workflow: a sector-specific, ideally locally-calibrated depth-damage
+## function (e.g. from a JRC/World Bank/BWDB post-flood damage survey).
+## Fallback is a generic composite residential/commercial curve (damage
+## fraction rising steeply from 0-2m then flattening as structures reach
+## near-total-loss), applied to each district's own potential inundation
+## depth from the Hazard pillar via linear interpolation.
+load_depth_damage <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("depth_m", "damage_fraction") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] depth_damage_curves.csv not found -- using a generic composite ",
+          "residential/commercial depth-damage curve (not locally calibrated).")
+  data.frame(depth_m = seq(0, 5, by = 0.5),
+             damage_fraction = c(0.00, 0.20, 0.35, 0.48, 0.58, 0.66, 0.73, 0.79, 0.84, 0.88, 0.92))
+}
+depth_damage_curve <- load_depth_damage(depth_damage_file)
+
+## ---- 3b. Coastal defence standards --------------------------------------------
+## Real workflow: FLOPROS or a BWDB polder/embankment inventory giving each
+## district's actual protection standard (design return period). Fallback
+## gives higher protection to the two urban/port districts (Khulna,
+## Chittagong) and lower protection to more rural, exposed districts.
+load_defence <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "defence_design_return_period_yrs") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] coastal_defence_standards.csv not found -- using illustrative ",
+          "FLOPROS-style design return periods (urban/port districts assumed better protected).")
+  data.frame(
+    district = c("Satkhira","Khulna","Bagerhat","Pirojpur","Barguna","Patuakhali",
+                 "Bhola","Lakshmipur","Noakhali","Feni","Chittagong","Cox's Bazar"),
+    defence_design_return_period_yrs = c(25, 50, 25, 20, 20, 25, 25, 30, 30, 25, 75, 40)
+  )
+}
+defence_data <- load_defence(defence_file)
+
+## ---- 3c. Socio-economic vulnerability index (SVI) ------------------------------
+## Real workflow: a composite SVI built from BBS census / HIES indicators
+## (poverty rate, literacy, housing quality, access to services, dependency
+## ratio, etc.), typically 0 (least vulnerable) to 1 (most vulnerable).
+## Fallback gives illustrative values, with more rural/exposed districts
+## scored higher and Cox's Bazar bumped up to reflect documented added
+## strain from hosting a large displaced-persons population alongside the
+## host community.
+load_svi <- function(path) {
+  if (file.exists(path)) {
+    df <- read.csv(path); names(df) <- tolower(names(df))
+    stopifnot(all(c("district", "svi_score") %in% names(df)))
+    return(df)
+  }
+  message("[synthetic fallback] socioeconomic_vulnerability.csv not found -- using an illustrative ",
+          "composite SVI (not derived from BBS/HIES microdata).")
+  data.frame(
+    district  = c("Satkhira","Khulna","Bagerhat","Pirojpur","Barguna","Patuakhali",
+                  "Bhola","Lakshmipur","Noakhali","Feni","Chittagong","Cox's Bazar"),
+    svi_score = c(0.72, 0.55, 0.68, 0.66, 0.78, 0.75, 0.74, 0.60, 0.58, 0.52, 0.40, 0.70)
+  )
+}
+svi_data <- load_svi(svi_file)
+
+## ---- 3d. Combine into VULNERABILITY index --------------------------------------
+vulnerability_data <- hazard_data %>%
+  select(district, potential_inundation_depth_m) %>%
+  mutate(damage_fraction = approx(depth_damage_curve$depth_m, depth_damage_curve$damage_fraction,
+                                  xout = potential_inundation_depth_m, rule = 2)$y) %>%
+  left_join(defence_data, by = "district") %>%
+  left_join(svi_data, by = "district") %>%
+  mutate(
+    ## protection gap relative to the 100-yr EWL design standard used in the Hazard
+    ## pillar -- a district whose embankments are only rated for a 20-yr event has
+    ## a much larger gap than one rated for 75-100 yr.
+    defence_gap_norm  = minmax11(1 / defence_design_return_period_yrs),
+    damage_norm       = minmax11(damage_fraction),
+    svi_norm          = minmax11(svi_score),
+    vulnerability_index = 0.40 * damage_norm + 0.30 * defence_gap_norm + 0.30 * svi_norm
+  ) %>%
+  select(district, damage_fraction, defence_design_return_period_yrs, svi_score, vulnerability_index)
+
+write.csv(vulnerability_data, file.path(out_dir, "table_vulnerability_data_2075.csv"), row.names = FALSE)
+
+## =============================================================================
+## COMBINE: FULL RISK = HAZARD x EXPOSURE x VULNERABILITY (IPCC AR5/AR6 form)
+## =============================================================================
+
+full_risk_2075 <- hazard_data %>%
+  select(district, hazard_index) %>%
+  left_join(exposure_data %>% select(district, exposure_index), by = "district") %>%
+  left_join(vulnerability_data %>% select(district, vulnerability_index), by = "district") %>%
+  left_join(approx_centroids, by = "district") %>%
+  mutate(
+    risk_score = hazard_index * exposure_index * vulnerability_index,
+    risk_class = cut(risk_score,
+                     breaks = quantile(risk_score, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE),
+                     labels = c("LOW", "MODERATE", "HIGH", "SEVERE"),
+                     include.lowest = TRUE)
+  ) %>%
+  select(district, lon, lat, hazard_index, exposure_index, vulnerability_index, risk_score, risk_class) %>%
+  arrange(desc(risk_score))
+
+write.csv(full_risk_2075, file.path(out_dir, "table_full_risk_assessment_2075.csv"), row.names = FALSE)
+
+cat("\n=== FULL HAZARD x EXPOSURE x VULNERABILITY RISK ASSESSMENT, 2075 (SSP5-8.5) ===\n")
+print(full_risk_2075)
+
+## ---- FIGURE: FOUR-PANEL H / E / V / RISK COMPARISON ----------------------------
+mk_panel <- function(df, fill_var, title, palette) {
+  ggplot2::ggplot(df, ggplot2::aes(lon, lat, color = .data[[fill_var]], size = .data[[fill_var]])) +
+    ggplot2::geom_point() +
+    ggplot2::scale_color_distiller(palette = palette, direction = 1) +
+    ggplot2::labs(title = title, x = NULL, y = NULL, color = NULL, size = NULL) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(legend.position = "bottom", axis.text = ggplot2::element_blank())
+}
+
+p_hazard <- mk_panel(full_risk_2075, "hazard_index", "Hazard", "Oranges")
+p_exposure <- mk_panel(full_risk_2075, "exposure_index", "Exposure", "Blues")
+p_vulnerability <- mk_panel(full_risk_2075, "vulnerability_index", "Vulnerability", "Purples")
+p_risk <- mk_panel(full_risk_2075, "risk_score", "Combined Risk (H x E x V)", "RdPu")
+
+if (requireNamespace("cowplot", quietly = TRUE)) {
+  p_full_framework <- cowplot::plot_grid(p_hazard, p_exposure, p_vulnerability, p_risk, ncol = 2,
+                                         labels = "AUTO")
+  p_full_framework <- cowplot::ggdraw() +
+    cowplot::draw_label("IPCC-Style Hazard x Exposure x Vulnerability Risk Framework, 2075 (SSP5-8.5)",
+                        fontface = "bold", size = 13, y = 0.99) +
+    cowplot::draw_plot(p_full_framework, y = 0, height = 0.94)
+  ggplot2::ggsave(file.path(fig_dir, "fig_full_risk_framework_2075.png"), p_full_framework,
+                  width = 10, height = 9, dpi = 300)
+} else {
+  message("[fallback] `cowplot` unavailable -- saving the four H/E/V/Risk panels as separate figures.")
+  ggplot2::ggsave(file.path(fig_dir, "fig_hazard_2075.png"), p_hazard, width = 6, height = 5.5, dpi = 300)
+  ggplot2::ggsave(file.path(fig_dir, "fig_exposure_2075.png"), p_exposure, width = 6, height = 5.5, dpi = 300)
+  ggplot2::ggsave(file.path(fig_dir, "fig_vulnerability_2075.png"), p_vulnerability, width = 6, height = 5.5, dpi = 300)
+  ggplot2::ggsave(file.path(fig_dir, "fig_full_risk_framework_2075.png"), p_risk, width = 6, height = 5.5, dpi = 300)
+}
+
+save(hazard_data, exposure_data, vulnerability_data, full_risk_2075,
+     file = file.path(out_dir, "script11_workspace.RData"))
+
+cat("\nFull Hazard x Exposure x Vulnerability assessment complete. See:\n",
+    " - table_hazard_data_2075.csv, table_exposure_data_2075.csv, table_vulnerability_data_2075.csv\n",
+    " - table_full_risk_assessment_2075.csv (combined Risk = H x E x V, district ranking)\n",
+    " - fig_full_risk_framework_2075.png\n")
+
+## ---- FINAL SYNC (Git + 'pins') --------------------------------------------------
+## This is now the last script in the full 01-11 pipeline; re-push here so
+## scripts 10-11's outputs are captured too if run in one session.
+if (exists("sync_push")) {
+  sync_push(commit_message = paste0(
+    "Auto-sync: full pipeline run through 11_full_hazard_exposure_vulnerability_risk.R (",
+    format(Sys.time(), "%Y-%m-%d %H:%M"), ")"))
+}
+# =============================================================================
+# CONTINUATION: Advanced Hydrological Connectivity Filtering
+# =============================================================================
+
+library(terra)
+library(tidyterra)   # needed for geom_spatraster()
+
+## ---- 0b. DEFENSIVE RASTER INPUT SETUP -----------------------------------------
+## `dem`, `twl_2075`, and `flood_mask` are not produced anywhere earlier in this
+## tabular (district-level) pipeline. This block reconstructs illustrative
+## versions of them so the connectivity analysis below can run standalone.
+
+if (!exists("dem")) {
+  message("[synthetic fallback] `dem` not found -- interpolating an illustrative elevation ",
+          "raster from district_cov$elevation_m via approx_centroids (NOT a real DEM; ",
+          "replace with an actual LiDAR/SRTM raster for production use).")
+  
+  pts_df <- approx_centroids %>%
+    left_join(district_cov %>% select(district, elevation_m), by = "district")
+  
+  r_template <- terra::rast(nrows = 200, ncols = 200,
+                            xmin = min(pts_df$lon) - 0.3, xmax = max(pts_df$lon) + 0.3,
+                            ymin = min(pts_df$lat) - 0.3, ymax = max(pts_df$lat) + 0.3,
+                            crs = "EPSG:4326")
+  
+  pts_vect <- terra::vect(pts_df, geom = c("lon", "lat"), crs = "EPSG:4326")
+  dem <- terra::rasterize(pts_vect, r_template, field = "elevation_m")
+  dem <- terra::focal(dem, w = 5, fun = "mean", na.policy = "only", na.rm = TRUE)
+  names(dem) <- "lyr.1"
+}
+
+if (!exists("twl_2075")) {
+  message("[synthetic fallback] `twl_2075` not found -- using the maximum district-level ",
+          "total water level (RSLR + 100-yr EWL) from the Hazard pillar as an illustrative ",
+          "single threshold.")
+  twl_2075 <- max(hazard_data$district_relative_slr_cm / 100 + hazard_data$ewl_100yr_m, na.rm = TRUE)
+}
+
+if (!exists("flood_mask")) {
+  message("[derived] `flood_mask` not found -- deriving a simple bathtub mask from `dem` and ",
+          "`twl_2075`: cells with elevation <= twl_2075 are flagged as flooded (1), else NA.")
+  flood_mask <- terra::ifel(dem <= twl_2075, 1, NA)
+  names(flood_mask) <- "flood"
+}
+
+## ---- 1. Group contiguous flooded cells into distinct patches -------------------
+message("Executing dynamic hydrological connectivity analysis...")
+
+flood_patches <- terra::patches(flood_mask, directions = 8, zeroAsNA = TRUE)
+
+## ---- 2. Extract patch IDs that touch the ocean boundary -------------------------
+ocean_line <- sf::st_as_sfc(sf::st_bbox(c(
+  xmin = terra::xmin(dem),
+  xmax = terra::xmax(dem),
+  ymin = terra::ymin(dem),
+  ymax = terra::ymin(dem) + (terra::res(dem)[2] * 2)
+), crs = sf::st_crs(dem)))
+
+ocean_vector <- terra::vect(ocean_line)
+
+## Use the actual layer name from flood_patches rather than assuming "patches"
+patch_layer_name <- names(flood_patches)[1]
+
+extracted <- terra::extract(flood_patches, ocean_vector)
+connected_patch_ids <- unique(extracted[[patch_layer_name]])
+connected_patch_ids <- connected_patch_ids[!is.na(connected_patch_ids)]
+
+## ---- 2b. Diagnostic guard --------------------------------------------------------
+## If no patches touch the sampled coastal strip, either the strip doesn't
+## overlap any flooded cells (check CRS / which edge is actually "ocean") or
+## flood_mask has no flooded cells there at all. Fall back to keeping ALL
+## patches rather than silently producing an empty connected_flood_mask.
+if (length(connected_patch_ids) == 0) {
+  warning("[connectivity check] No flood patches intersect the sampled ocean boundary strip -- ",
+          "check that dem's y-axis orientation/CRS actually puts the coast at ymin, and that ",
+          "flood_mask has flooded cells there. Falling back to treating ALL patches as connected ",
+          "(i.e. no filtering applied) so the pipeline can continue.")
+  connected_patch_ids <- unique(terra::values(flood_patches, na.rm = TRUE))
+}
+
+## ---- 3. Filter flood mask to retain only hydrologically connected cells --------
+connected_flood_mask <- flood_patches %in% connected_patch_ids
+connected_flood_mask[connected_flood_mask == 0] <- NA
+
+## ---- 4. Render the hydrologically corrected 2075 predictive layout -------------
+ggplot() +
+  geom_spatraster(data = dem, aes(fill = lyr.1)) +
+  scale_fill_hypso_c(name = "Elevation (m)") +
+  geom_spatraster(data = connected_flood_mask, fill = "#DC2626", alpha = 0.5) +
+  labs(
+    title = "Hydrologically Connected 100-Year Coastal Inundation Risk Zone (2075)",
+    subtitle = paste("Filtered to remove isolated land sinks. Threshold ceiling:", round(twl_2075, 2), "meters"),
+    caption = "Source: Advanced Coastal Flood Risk Forecasting Model Implementation"
+  ) +
+  theme_minimal()

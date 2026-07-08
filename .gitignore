@@ -1,0 +1,22 @@
+# R session / workspace artifacts (regenerate by re-running scripts, don't commit)
+.Rhistory
+.RData
+.RDataTmp
+.Rproj.user/
+*_workspace.RData
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large or regenerable outputs (keep tracked ones explicit if needed)
+/outputs/*
+!/outputs/.gitkeep
+
+# renv (if adopted)
+renv/library/
+renv/staging/
+
+# Editor files
+.vscode/
+*.Rproj
